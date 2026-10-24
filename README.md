@@ -77,7 +77,7 @@ then run again.
 
 | stage | typical |
 |---|---|
-| camera frame | 16–33 ms (30–60 fps) |
+| camera frame | 33 ms (30 fps; default 640×360, because a Logitech C270 gives only 15 fps at 640×480) |
 | pose model (`full`) | 9–12 ms measured on a desktop CPU; `lite` is faster |
 | filter + mapping | < 1 ms |
 | network (Tailscale) | ~7 ms one way (13 ms round trip measured) |

@@ -110,8 +110,9 @@ def main():
     ap.add_argument("--model", default="full", choices=["lite", "full", "heavy"],
                     help="lite = fastest, heavy = most accurate (default full)")
     ap.add_argument("--width", type=int, default=640)
-    ap.add_argument("--height", type=int, default=480)
-    ap.add_argument("--fps", type=int, default=60)
+    ap.add_argument("--height", type=int, default=360,
+                    help="360 not 480: a Logitech C270 does 30 fps at 640x360 but only 15 at 640x480")
+    ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--no-mirror", action="store_true")
     ap.add_argument("--no-head", action="store_true")
     ap.add_argument("--smooth", type=float, default=1.2,
