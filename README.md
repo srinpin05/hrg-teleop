@@ -132,7 +132,8 @@ The robot side lives in the main robot code (desktop `~/hrg_urdf/deploy`, Pi
 - [x] Arms and head, laptop camera, Tailscale
 - [ ] Watch it in Foxglove at the same time (works already: ArmBus reports to the ROS view)
 - [ ] Hand open/close (needs a gripper), wrist
-- [ ] Legs: see "Adding legs" below
+- [ ] Arm precision: `docs/ARM_PRECISION_PLAN.md` (next)
+- [ ] Legs: plan in `docs/LEG_MIMIC_PLAN.md` (summary below)
 
 ### Adding legs
 
