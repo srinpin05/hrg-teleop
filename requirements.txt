@@ -1,0 +1,4 @@
+# mediapipe brings opencv-contrib-python (camera + window), numpy, etc.
+# Do NOT add opencv-python as well -- two OpenCV packages fight over cv2.
+mediapipe==1.1.1
+numpy

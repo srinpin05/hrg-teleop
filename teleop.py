@@ -1,0 +1,239 @@
+"""HRG teleop: your laptop camera -> MediaPipe pose -> robot arm + head angles -> UDP to the robot.
+
+    python teleop.py                     # sends to the robot "hrg" (Tailscale name)
+    python teleop.py --robot 100.97.141.88
+    python teleop.py --dry               # no robot: camera + skeleton + robot preview only
+
+Keys (click the video window first):
+    SPACE  start/stop sending to the robot. It starts PAUSED.
+    C      calibrate the head: look straight at the camera, then press C
+    M      mirror on/off. With mirror on (default), facing the robot, your
+           right arm moves ITS left arm, like a mirror.
+    H      head tracking on/off
+    Q/ESC  quit (the robot's arms go to rest)
+
+The robot side must be running:  cd ~/hrg_deploy && ./teleop.sh
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import sys
+import time
+import urllib.request
+
+import cv2
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from hrg_teleop.filters import JointFilter          # noqa: E402
+from hrg_teleop.net import RobotLink                # noqa: E402
+from hrg_teleop.retarget import Retargeter, arm_fk  # noqa: E402
+
+MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+             "pose_landmarker_{v}/float16/latest/pose_landmarker_{v}.task")
+LOST_AFTER = 0.5        # s without a person -> tell the robot to rest
+SEND_HZ_PAUSED = 10     # heartbeat while paused, so the robot shows "link OK"
+
+# skeleton lines for the overlay (MediaPipe Pose indices)
+BONES = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24), (23, 24),
+         (0, 7), (0, 8), (15, 19), (16, 20)]
+
+
+def model_path(variant):
+    p = os.path.join(HERE, "models", f"pose_landmarker_{variant}.task")
+    if not os.path.exists(p):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        print(f"downloading the {variant} pose model (one time)...")
+        urllib.request.urlretrieve(MODEL_URL.format(v=variant), p)
+    return p
+
+
+def open_camera(index, w, h, fps):
+    if sys.platform.startswith("win"):
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)       # opens much faster on Windows
+    else:
+        cap = cv2.VideoCapture(index)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)                     # newest frame, not a queued old one
+    return cap
+
+
+def draw_robot(q, size=300):
+    """Front view and side view of the robot's commanded arm/head pose."""
+    img = np.full((size, size * 2, 3), 32, np.uint8)
+    L = 0.15                                   # segment length, m (drawing only)
+    k = size / 0.75                            # px per m
+
+    def front(p, cx):     # viewer faces the robot: robot +y (its left) is screen RIGHT
+        return int(cx + p[1] * k), int(size * 0.42 - p[2] * k)
+
+    def side(p, cx):      # seen from the robot's left: forward (+x) is screen LEFT
+        return int(cx - p[0] * k), int(size * 0.42 - p[2] * k)
+
+    for view, cx, proj in (("front", size // 2, front), ("side (its left)", size + size // 2, side)):
+        sh_y = 0.09
+        torso = [np.array([0, sh_y, 0]), np.array([0, -sh_y, 0]),
+                 np.array([0, -0.07, -0.22]), np.array([0, 0.07, -0.22])]
+        pts = np.array([proj(p, cx) for p in torso], np.int32)
+        cv2.polylines(img, [pts], True, (120, 120, 120), 2)
+        for side_name, s, col in (("left", 1, (255, 170, 60)), ("right", -1, (40, 160, 255))):   # BGR: blue, orange
+            g = lambda j: q.get(f"{side_name}_{j}", 0.0)
+            u, f = arm_fk(s, g("shoulder_pitch"), g("shoulder_roll"), g("forearm_twist"), g("elbow"))
+            a = np.array([0, s * sh_y, 0]); b = a + u * L; c = b + f * L
+            cv2.line(img, proj(a, cx), proj(b, cx), col, 4)
+            cv2.line(img, proj(b, cx), proj(c, cx), col, 4)
+        head = np.array([0, 0, 0.08])
+        cv2.circle(img, proj(head, cx), int(0.05 * k), (200, 200, 200), 2)
+        yaw, pitch = q.get("neck_yaw", 0.0), q.get("neck_pitch", 0.0)
+        nose = head + 0.07 * np.array([math.cos(pitch) * math.cos(yaw),
+                                       math.cos(pitch) * math.sin(yaw), math.sin(pitch)])
+        cv2.line(img, proj(head, cx), proj(nose, cx), (0, 255, 0), 3)
+        cv2.putText(img, view, (cx - 60, size - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+    cv2.putText(img, "ROBOT (commanded)  orange=its right  blue=its left", (8, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
+    return img
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--robot", default=os.environ.get("HRG_ROBOT", "hrg"),
+                    help="robot host/IP (default hrg; or 100.97.141.88 on Tailscale, or its Wi-Fi IP)")
+    ap.add_argument("--port", type=int, default=9874)
+    ap.add_argument("--dry", action="store_true", help="don't send anything")
+    ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--video", help="use a video file instead of the camera (testing)")
+    ap.add_argument("--model", default="full", choices=["lite", "full", "heavy"],
+                    help="lite = fastest, heavy = most accurate (default full)")
+    ap.add_argument("--width", type=int, default=640)
+    ap.add_argument("--height", type=int, default=480)
+    ap.add_argument("--fps", type=int, default=60)
+    ap.add_argument("--no-mirror", action="store_true")
+    ap.add_argument("--no-head", action="store_true")
+    ap.add_argument("--smooth", type=float, default=1.2,
+                    help="filter min cutoff Hz: lower = smoother but laggier (default 1.2)")
+    ap.add_argument("--max-frames", type=int, default=0, help="quit after N frames (testing)")
+    ap.add_argument("--headless", action="store_true", help="no window (testing)")
+    args = ap.parse_args()
+
+    import mediapipe as mp
+    from mediapipe.tasks.python import BaseOptions
+    from mediapipe.tasks.python import vision
+
+    landmarker = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path(args.model)),
+        running_mode=vision.RunningMode.VIDEO, num_poses=1,
+        min_pose_detection_confidence=0.5, min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5))
+
+    cap = cv2.VideoCapture(args.video) if args.video else open_camera(args.camera, args.width, args.height, args.fps)
+    if not cap.isOpened():
+        raise SystemExit("can't open the camera. On a Mac, allow camera access for the Terminal app "
+                         "(System Settings > Privacy & Security > Camera); try --camera 1")
+    link = RobotLink(args.robot, args.port, dry=args.dry)
+    rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head)
+    filt = JointFilter(min_cutoff=args.smooth, beta=0.4)
+    sending = False
+    cmd = {}                     # last command per joint (joints not seen this frame hold)
+    last_seen = 0.0
+    last_paused_send = 0.0
+    t0 = time.monotonic()
+    fps = infer_ms = 0.0
+    n = 0
+    last_P = None
+    print(f"robot {args.robot}:{args.port} ({'DRY RUN' if args.dry else link.addr or link.error}) -- "
+          "SPACE = start/stop sending, C = calibrate head, M = mirror, Q = quit")
+    while True:
+        t_frame = time.monotonic()
+        ok, frame = cap.read()
+        if not ok:
+            break
+        n += 1
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        ti = time.monotonic()
+        res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
+                                          int((ti - t0) * 1000))
+        infer_ms = 0.9 * infer_ms + 0.1 * (time.monotonic() - ti) * 1000
+        now = time.monotonic()
+        person = bool(res.pose_world_landmarks)
+        if person:
+            W = res.pose_world_landmarks[0]
+            P = np.array([[p.x, p.y, p.z] for p in W])
+            vis = np.array([p.visibility if p.visibility is not None else 1.0 for p in W])
+            last_P = P
+            q = rt.solve(P, vis)
+            if q:
+                last_seen = now
+                cmd.update(filt(q, now))
+        tracking = now - last_seen < LOST_AFTER
+        if sending and tracking:
+            link.send(True, cmd)
+        elif now - last_paused_send > 1.0 / SEND_HZ_PAUSED:
+            link.send(False, {})                 # robot: ease to rest / stay at rest
+            last_paused_send = now
+
+        # ---- display ----
+        dt = now - t_frame
+        fps = 0.9 * fps + 0.1 * (1.0 / max(dt, 1e-3))
+        if not args.headless:
+            view = cv2.flip(frame, 1)            # selfie view; the model saw the unflipped frame
+            h, w = view.shape[:2]
+            if person:
+                pts = [(int((1 - p.x) * w), int(p.y * h)) for p in res.pose_landmarks[0]]
+                for a, b in BONES:
+                    cv2.line(view, pts[a], pts[b], (0, 255, 0), 2)
+                for i in (0, 11, 12, 13, 14, 15, 16):
+                    cv2.circle(view, pts[i], 4, (0, 0, 255), -1)
+            if link.dry:
+                state, col = "DRY RUN (not sending)", (200, 200, 200)
+            elif not sending:
+                state, col = "PAUSED - press SPACE to drive the robot", (0, 200, 255)
+            elif not tracking:
+                state, col = "NO PERSON - robot resting", (0, 0, 255)
+            else:
+                state, col = "SENDING TO ROBOT", (0, 255, 0)
+            replied = link.last_ack and now - link.last_ack < 1.5
+            net = ("dry" if link.dry else link.error or
+                   (f"rtt {link.rtt_ms:.0f} ms" if replied and link.rtt_ms is not None else "robot not replying"))
+            lines = [state,
+                     f"{fps:4.0f} fps  model {infer_ms:4.0f} ms  {net}",
+                     f"mirror {'ON' if rt.mirror else 'off'}  head {'ON' if rt.head else 'off'}"]
+            for i, txt in enumerate(lines):
+                cv2.putText(view, txt, (10, 24 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            col if i == 0 else (255, 255, 255), 2)
+            panel = draw_robot(cmd, size=h // 2)
+            joints = np.full((h - panel.shape[0], panel.shape[1], 3), 24, np.uint8)
+            for i, (k, v) in enumerate(sorted(cmd.items())):
+                cv2.putText(joints, f"{k:22s}{math.degrees(v):+6.0f}", (8, 18 + 16 * i),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
+            cv2.imshow("HRG teleop", np.hstack([view, np.vstack([panel, joints])]))
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            if key == ord(" "):
+                sending = not sending and not link.dry
+                print("SENDING" if sending else "paused")
+            elif key == ord("m"):
+                rt.mirror = not rt.mirror
+                rt.prev.clear()
+            elif key == ord("h"):
+                rt.head = not rt.head
+            elif key == ord("c") and last_P is not None:
+                rt.calibrate_head(last_P)
+                print("head calibrated")
+        if args.max_frames and n >= args.max_frames:
+            break
+    for _ in range(3):
+        link.send(False, {})
+    cap.release()
+    landmarker.close()
+    cv2.destroyAllWindows()
+    print(f"{n} frames, {fps:.0f} fps, model {infer_ms:.0f} ms")
+
+
+if __name__ == "__main__":
+    main()
