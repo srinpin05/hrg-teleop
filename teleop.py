@@ -182,12 +182,12 @@ def main():
         if not ok:
             break
         n += 1
-        if t_auto is not None and time.monotonic() >= t_auto:
-            sending, t_auto = True, None
-            if last_P is not None:          # you're standing straight during the countdown: calibrate
+        if t_auto is not None and time.monotonic() >= t_auto and last_P is not None:
+            # calibrate on you standing straight; with legs on, wait until that succeeds
+            if not rt.legs or rt.calibrate_legs(last_P, last_vis):
                 rt.calibrate_head(last_P)
-                print("autostart: calibrated, legs", "OK" if rt.calibrate_legs(last_P, last_vis) else "NOT SEEN")
-            print("SENDING (autostart)")
+                sending, t_auto = True, None
+                print("autostart: calibrated, SENDING", flush=True)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         ti = time.monotonic()
         res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
@@ -238,7 +238,8 @@ def main():
             if link.dry:
                 state, col = "DRY RUN (not sending)", (200, 200, 200)
             elif not sending and t_auto is not None:
-                state, col = f"STAND STRAIGHT, FACE CAMERA - starts in {t_auto - now:.0f} s", (0, 200, 255)
+                state, col = (f"STAND STRAIGHT, FACE CAMERA - starts in {t_auto - now:.0f} s" if t_auto > now
+                              else "STAND STRAIGHT, whole body in view - waiting to calibrate"), (0, 200, 255)
             elif not sending:
                 state, col = "PAUSED - press SPACE to drive the robot", (0, 200, 255)
             elif not tracking:
