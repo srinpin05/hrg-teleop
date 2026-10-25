@@ -38,7 +38,7 @@ packets of joint angles. The legs aren't involved.
 |---|---|
 | **SPACE** | start/stop driving the robot. It starts **PAUSED**. |
 | **C** | calibrate the head: look straight at the camera, press C |
-| **M** | mirror on/off. **Mirror on (default):** facing the robot, your right arm moves its left arm, like a mirror. |
+| **M** | mirror on/off. **Default off:** your right arm/leg moves the robot's right. **Mirror on** (`--mirror`): your right moves its left, like a mirror. |
 | **H** | head tracking on/off |
 | **L** | legs on/off: first draft, one to one, **only with the robot hanging in its frame**. Needs both legs, hips to feet, in view. Robot side: `./teleop.sh legs` |
 | **Q** / Esc | quit; the robot's arms go back to rest |
@@ -55,7 +55,8 @@ Options:
 | `--model lite` | faster model for a slow laptop (`heavy` = more accurate). Downloaded on first use. |
 | `--camera 1` | a different webcam |
 | `--smooth 0.8` | smoother, but laggier. `2.0` = snappier, but jittery. |
-| `--no-mirror`, `--no-head` | start with those off |
+| `--mirror` | start with mirror on |
+| `--no-head` | start with head tracking off |
 
 On a Mac, the first run asks for camera permission for Terminal. Allow it,
 then run again.
@@ -106,7 +107,7 @@ network part.
    - **Elbow nearly straight:** twist is held, because it's undefined there.
 3. **Head.** Yaw and pitch come from the nose relative to your ears, minus
    the calibration (C).
-4. **Mirror.** Swaps left and right and reflects the sideways components.
+4. **Mirror** (off by default, key M). Swaps left and right and reflects the sideways components.
 
 Tests: `python tests/test_retarget.py`. They check the forward model, an IK
 round trip over 3000 random poses, no flip when raising the arm sideways,

@@ -7,8 +7,8 @@
 Keys (click the video window first):
     SPACE  start/stop sending to the robot. It starts PAUSED.
     C      calibrate: stand straight, look at the camera, press C (head, and legs if seen)
-    M      mirror on/off. With mirror on (default), facing the robot, your
-           right arm moves ITS left arm, like a mirror.
+    M      mirror on/off. Default OFF: your right arm/leg moves ITS right.
+           With mirror on, your right moves ITS left, like a mirror.
     H      head tracking on/off
     L      legs on/off (first draft: one-to-one, ONLY with the robot hanging in its
            frame). Needs both legs, hips to feet, in view. Robot: ./teleop.sh legs
@@ -128,7 +128,9 @@ def main():
     ap.add_argument("--height", type=int, default=360,
                     help="360 not 480: a Logitech C270 does 30 fps at 640x360 but only 15 at 640x480")
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--no-mirror", action="store_true")
+    ap.add_argument("--mirror", action="store_true",
+                    help="start with mirror ON (your right moves ITS left). Default since 2026-10-25: off, same side")
+    ap.add_argument("--no-mirror", action="store_true", help="(default now; kept for old commands)")
     ap.add_argument("--no-head", action="store_true")
     ap.add_argument("--legs", action="store_true", help="start with legs on (L toggles). Robot must be hanging.")
     ap.add_argument("--leg-feet", action="store_true", help="follow your foot angle too (default: robot feet flat)")
@@ -159,7 +161,7 @@ def main():
                          "can't open the camera. On a Mac, allow camera access for the Terminal app "
                          "(System Settings > Privacy & Security > Camera); try --camera 1")
     link = RobotLink(args.robot, args.port, dry=args.dry)
-    rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head, legs=args.legs, leg_feet=args.leg_feet)
+    rt = Retargeter(mirror=args.mirror, head=not args.no_head, legs=args.legs, leg_feet=args.leg_feet)
     last_vis = None
     # beta 1.0 (was 0.4): the filter opens up faster on quick moves -> less lag
     filt = JointFilter(min_cutoff=args.smooth, beta=1.0)
