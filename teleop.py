@@ -154,7 +154,9 @@ def main():
 
     cap = cv2.VideoCapture(args.video) if args.video else open_camera(args.camera, args.width, args.height, args.fps)
     if not cap.isOpened():
-        raise SystemExit("can't open the camera. On a Mac, allow camera access for the Terminal app "
+        landmarker.close()
+        raise SystemExit("no camera found (Linux: is the webcam plugged in? `ls /dev/video*`). "
+                         "can't open the camera. On a Mac, allow camera access for the Terminal app "
                          "(System Settings > Privacy & Security > Camera); try --camera 1")
     link = RobotLink(args.robot, args.port, dry=args.dry)
     rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head, legs=args.legs, leg_feet=args.leg_feet)
