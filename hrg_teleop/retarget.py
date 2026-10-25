@@ -165,6 +165,11 @@ def leg_ik(s, t, sh, foot=None, off=None):
     t, sh = _unit(np.asarray(t, float)), _unit(np.asarray(sh, float))
     pitch = math.asin(max(-1.0, min(1.0, t[0])))
     roll = math.atan2(s * t[1], -t[2])
+    # roll is ill-defined once the thigh is near horizontal (t_y, t_z both ~0): a small
+    # sideways wobble of the knee became 30 deg of roll and the leg kicked OUT instead of
+    # forward. Full roll below 45 deg of hip pitch, faded to 0 by 75 deg.
+    roll *= min(1.0, max(0.0, (math.cos(pitch) - math.cos(math.radians(75)))
+                         / (math.cos(math.radians(45)) - math.cos(math.radians(75)))))
     knee = math.acos(max(-1.0, min(1.0, float(t @ sh))))
     if off:     # standing-straight calibration (key C): the camera reads ~20 deg of knee when straight
         pitch -= off.get("hip_pitch", 0.0)

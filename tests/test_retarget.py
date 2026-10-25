@@ -131,6 +131,9 @@ def test_legs():
     assert abs(q["left_ankle_pitch"]) < 1e-6                           # foot flat
     q = leg_ik(-1, [0, -math.sin(D(20)), -math.cos(D(20))], [0, -math.sin(D(20)), -math.cos(D(20))])
     assert abs(q["right_hip_roll"] - D(20)) < 1e-6                     # right leg out = +roll
+    # knee raised to horizontal with a small sideways wobble: no big roll
+    q = leg_ik(1, [math.cos(D(5)), math.sin(D(5)), -0.02], [0, 0, -1])
+    assert abs(q["left_hip_roll"]) < D(3)
 
 
 if __name__ == "__main__":
