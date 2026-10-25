@@ -184,6 +184,9 @@ def main():
         n += 1
         if t_auto is not None and time.monotonic() >= t_auto:
             sending, t_auto = True, None
+            if last_P is not None:          # you're standing straight during the countdown: calibrate
+                rt.calibrate_head(last_P)
+                print("autostart: calibrated, legs", "OK" if rt.calibrate_legs(last_P, last_vis) else "NOT SEEN")
             print("SENDING (autostart)")
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         ti = time.monotonic()
@@ -235,7 +238,7 @@ def main():
             if link.dry:
                 state, col = "DRY RUN (not sending)", (200, 200, 200)
             elif not sending and t_auto is not None:
-                state, col = f"GET IN POSITION - robot starts in {t_auto - now:.0f} s", (0, 200, 255)
+                state, col = f"STAND STRAIGHT, FACE CAMERA - starts in {t_auto - now:.0f} s", (0, 200, 255)
             elif not sending:
                 state, col = "PAUSED - press SPACE to drive the robot", (0, 200, 255)
             elif not tracking:
