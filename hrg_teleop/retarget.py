@@ -247,9 +247,14 @@ class Retargeter:
         """Both legs or nothing: hips, knees and ankles of both legs must be seen."""
         if min(vis[i] for i in (L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANK, R_ANK)) < min_vis:
             return {}
-        # pelvis frame: y along the hips, up from the torso, forward agrees with B
+        # leg frame: up = TRUE vertical (camera's up; MediaPipe world y points down),
+        # NOT the torso -- bending over the desk must not lift the robot's legs.
+        # y along the hips (levelled), forward agrees with the body frame B.
+        z = np.array([0.0, -1.0, 0.0])
+        if float(z @ B[2]) < 0:
+            z = -z
         y = _unit(P[L_HIP] - P[R_HIP])
-        z = _unit(B[2] - float(B[2] @ y) * y)
+        y = _unit(y - float(y @ z) * z)
         x = _unit(np.cross(y, z))
         if float(x @ B[0]) < 0:
             x = -x
@@ -281,8 +286,16 @@ class Retargeter:
 
     def calibrate_legs(self, P, vis):
         """Call while the person stands straight: that becomes legs straight (all 0). -> True if done."""
-        q = self.solve_legs(P, vis, self.body_frame(P), raw=True)
+        B = self.body_frame(P)
+        q = self.solve_legs(P, vis, B, raw=True)
         if not q:
+            return False
+        # only accept an upright, roughly straight stance (torso within 28 deg of camera vertical,
+        # knees < 40, hips < 30): calibrating on a bent pose made "straight" read bent
+        up = abs(B[2][1])          # |torso up . camera vertical|
+        if up < math.cos(math.radians(28)) or max(abs(q[f"{s}_{j}"]) for s in ("left", "right")
+                                                 for j in ("knee", "hip_pitch")) > math.radians(40) \
+                or max(abs(q["left_hip_pitch"]), abs(q["right_hip_pitch"])) > math.radians(30):
             return False
         for side in ("left", "right"):
             self.leg_off[side] = {j: q[f"{side}_{j}"] for j in ("hip_pitch", "hip_roll", "knee")}
