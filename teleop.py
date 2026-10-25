@@ -6,7 +6,7 @@
 
 Keys (click the video window first):
     SPACE  start/stop sending to the robot. It starts PAUSED.
-    C      calibrate the head: look straight at the camera, then press C
+    C      calibrate: stand straight, look at the camera, press C (head, and legs if seen)
     M      mirror on/off. With mirror on (default), facing the robot, your
            right arm moves ITS left arm, like a mirror.
     H      head tracking on/off
@@ -131,8 +131,13 @@ def main():
     ap.add_argument("--no-mirror", action="store_true")
     ap.add_argument("--no-head", action="store_true")
     ap.add_argument("--legs", action="store_true", help="start with legs on (L toggles). Robot must be hanging.")
+    ap.add_argument("--leg-feet", action="store_true", help="follow your foot angle too (default: robot feet flat)")
     ap.add_argument("--smooth", type=float, default=1.2,
                     help="filter min cutoff Hz: lower = smoother but laggier (default 1.2)")
+    ap.add_argument("--record", help="write every frame (landmarks, raw and filtered angles) to this .jsonl")
+    ap.add_argument("--snap", help="save the window image every 10th frame into this folder")
+    ap.add_argument("--autostart", type=float, default=-1, metavar="S",
+                    help="start SENDING by itself S seconds after the camera opens (no SPACE needed)")
     ap.add_argument("--max-frames", type=int, default=0, help="quit after N frames (testing)")
     ap.add_argument("--headless", action="store_true", help="no window (testing)")
     args = ap.parse_args()
@@ -152,7 +157,8 @@ def main():
         raise SystemExit("can't open the camera. On a Mac, allow camera access for the Terminal app "
                          "(System Settings > Privacy & Security > Camera); try --camera 1")
     link = RobotLink(args.robot, args.port, dry=args.dry)
-    rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head, legs=args.legs)
+    rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head, legs=args.legs, leg_feet=args.leg_feet)
+    last_vis = None
     # beta 1.0 (was 0.4): the filter opens up faster on quick moves -> less lag
     filt = JointFilter(min_cutoff=args.smooth, beta=1.0)
     legs_seen = 0.0
@@ -164,6 +170,10 @@ def main():
     fps = infer_ms = 0.0
     n = 0
     last_P = None
+    rec = open(args.record, "w", buffering=1) if args.record else None
+    if args.snap:
+        os.makedirs(args.snap, exist_ok=True)
+    t_auto = time.monotonic() + args.autostart if args.autostart >= 0 and not link.dry else None
     print(f"robot {args.robot}:{args.port} ({'DRY RUN' if args.dry else link.addr or link.error}) -- "
           "SPACE = start/stop sending, C = calibrate head, M = mirror, Q = quit")
     while True:
@@ -172,6 +182,9 @@ def main():
         if not ok:
             break
         n += 1
+        if t_auto is not None and time.monotonic() >= t_auto:
+            sending, t_auto = True, None
+            print("SENDING (autostart)")
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         ti = time.monotonic()
         res = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
@@ -183,13 +196,20 @@ def main():
             W = res.pose_world_landmarks[0]
             P = np.array([[p.x, p.y, p.z] for p in W])
             vis = np.array([p.visibility if p.visibility is not None else 1.0 for p in W])
-            last_P = P
+            last_P, last_vis = P, vis
             q = rt.solve(P, vis)
             if q:
                 last_seen = now
                 if any(k.endswith("_knee") for k in q):
                     legs_seen = now
                 cmd.update(filt(q, now))
+            if rec:
+                import json
+                rec.write(json.dumps({"t": round(now - t0, 3), "P": np.round(P, 3).tolist(),
+                                      "vis": np.round(vis, 2).tolist(),
+                                      "q": {k: round(v, 4) for k, v in q.items()},
+                                      "cmd": {k: round(v, 4) for k, v in cmd.items()},
+                                      "sending": sending}) + "\n")
         tracking = now - last_seen < LOST_AFTER
         if sending and tracking:
             arms = {k: v for k, v in cmd.items() if not k.endswith(LEG_KEYS)}
@@ -214,6 +234,8 @@ def main():
                     cv2.circle(view, pts[i], 4, (0, 0, 255), -1)
             if link.dry:
                 state, col = "DRY RUN (not sending)", (200, 200, 200)
+            elif not sending and t_auto is not None:
+                state, col = f"GET IN POSITION - robot starts in {t_auto - now:.0f} s", (0, 200, 255)
             elif not sending:
                 state, col = "PAUSED - press SPACE to drive the robot", (0, 200, 255)
             elif not tracking:
@@ -240,7 +262,10 @@ def main():
                     name = k.replace("shoulder_", "sh_").replace("forearm_", "fa_").replace("_pitch", "_p")
                     cv2.putText(joints, f"{name:15s}{math.degrees(v):+5.0f}", (6 + c * colw, 14 + 13 * i),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.37, (220, 220, 220), 1)
-            cv2.imshow("HRG teleop", np.hstack([view, np.vstack([panel, joints])]))
+            full = np.hstack([view, np.vstack([panel, joints])])
+            if args.snap and n % 10 == 0:
+                cv2.imwrite(os.path.join(args.snap, f"f{n:05d}.jpg"), full, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            cv2.imshow("HRG teleop", full)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
@@ -260,11 +285,14 @@ def main():
                 rt.head = not rt.head
             elif key == ord("c") and last_P is not None:
                 rt.calibrate_head(last_P)
-                print("head calibrated")
+                legs_ok = rt.calibrate_legs(last_P, last_vis)
+                print("head calibrated" + ("; legs calibrated (standing straight = 0)" if legs_ok else "; legs not in view"))
         if args.max_frames and n >= args.max_frames:
             break
     for _ in range(3):
         link.send(False, {})
+    if rec:
+        rec.close()
     cap.release()
     landmarker.close()
     cv2.destroyAllWindows()

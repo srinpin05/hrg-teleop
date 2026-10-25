@@ -156,7 +156,7 @@ def arm_ik(s, u, f, prev=None, min_bend=math.radians(35), lateral_cos=0.25):
     }
 
 
-def leg_ik(s, t, sh, foot=None):
+def leg_ik(s, t, sh, foot=None, off=None):
     """Thigh t, shin sh, foot heel->toe (body frame, unit or not) -> leg angles.
     Hip modelled as roll (outer) then pitch: t = (sin p, s sin r cos p, -cos r cos p).
     Foot: robot toe-up angle = hip_pitch - knee + ankle, so ankle = phi - hip + knee
@@ -166,6 +166,10 @@ def leg_ik(s, t, sh, foot=None):
     pitch = math.asin(max(-1.0, min(1.0, t[0])))
     roll = math.atan2(s * t[1], -t[2])
     knee = math.acos(max(-1.0, min(1.0, float(t @ sh))))
+    if off:     # standing-straight calibration (key C): the camera reads ~20 deg of knee when straight
+        pitch -= off.get("hip_pitch", 0.0)
+        roll -= off.get("hip_roll", 0.0)
+        knee = max(0.0, knee - off.get("knee", 0.0))
     phi = 0.0
     if foot is not None:
         fv = np.asarray(foot, float)
@@ -185,6 +189,8 @@ class Retargeter:
     head: bool = True
     min_visibility: float = 0.3      # was 0.5: motion blur on fast moves froze the arm
     legs: bool = False
+    leg_feet: bool = False        # follow the foot angle; off = robot feet stay flat (foot landmarks are noisy)
+    leg_off: dict = field(default_factory=dict)    # side -> {hip_pitch, hip_roll, knee} from calibrate_legs()
     head_neutral_pitch: float = 0.0     # rad, set by calibrate_head()
     head_neutral_yaw: float = 0.0
     prev: dict = field(default_factory=dict)
@@ -237,7 +243,7 @@ class Retargeter:
             out["neck_pitch"] = clamp("neck_pitch", pitch - self.head_neutral_pitch)
         return out
 
-    def solve_legs(self, P, vis, B, min_vis=0.5):
+    def solve_legs(self, P, vis, B, min_vis=0.5, raw=False):
         """Both legs or nothing: hips, knees and ankles of both legs must be seen."""
         if min(vis[i] for i in (L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANK, R_ANK)) < min_vis:
             return {}
@@ -258,10 +264,11 @@ class Retargeter:
         for side, s, h, k, a, he, to in legs:
             t = H @ (P[k] - P[h])
             sh = H @ (P[a] - P[k])
-            foot = H @ (P[to] - P[he]) if min(vis[he], vis[to]) >= min_vis else None
+            foot = (H @ (P[to] - P[he]) if self.leg_feet and not raw
+                    and min(vis[he], vis[to]) >= min_vis else None)
             if self.mirror:
                 t[1], sh[1] = -t[1], -sh[1]
-            out.update(leg_ik(s, t, sh, foot))
+            out.update(leg_ik(s, t, sh, foot, None if raw else self.leg_off.get(side)))
         return out
 
     @staticmethod
@@ -271,6 +278,15 @@ class Retargeter:
         yaw = math.atan2(n[1], n[0])
         pitch = math.atan2(n[2], math.hypot(n[0], n[1]))
         return yaw, pitch
+
+    def calibrate_legs(self, P, vis):
+        """Call while the person stands straight: that becomes legs straight (all 0). -> True if done."""
+        q = self.solve_legs(P, vis, self.body_frame(P), raw=True)
+        if not q:
+            return False
+        for side in ("left", "right"):
+            self.leg_off[side] = {j: q[f"{side}_{j}"] for j in ("hip_pitch", "hip_roll", "knee")}
+        return True
 
     def calibrate_head(self, P):
         """Call while the person looks straight at the camera: that becomes neck 0."""
