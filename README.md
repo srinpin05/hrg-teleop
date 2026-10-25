@@ -40,6 +40,7 @@ packets of joint angles. The legs aren't involved.
 | **C** | calibrate the head: look straight at the camera, press C |
 | **M** | mirror on/off. **Mirror on (default):** facing the robot, your right arm moves its left arm, like a mirror. |
 | **H** | head tracking on/off |
+| **L** | legs on/off: first draft, one to one, **only with the robot hanging in its frame**. Needs both legs, hips to feet, in view. Robot side: `./teleop.sh legs` |
 | **Q** / Esc | quit; the robot's arms go back to rest |
 
 The window shows your skeleton, the robot's commanded pose (front and side),
@@ -132,7 +133,8 @@ The robot side lives in the main robot code (desktop `~/hrg_urdf/deploy`, Pi
 - [x] Arms and head, laptop camera, Tailscale
 - [ ] Watch it in Foxglove at the same time (works already: ArmBus reports to the ROS view)
 - [ ] Hand open/close (needs a gripper), wrist
-- [ ] Arm precision: `docs/ARM_PRECISION_PLAN.md` (next)
+- [~] Arm precision, `docs/ARM_PRECISION_PLAN.md`. Done 2026-10-25: visibility 0.3 (no freeze on blur), branch reset when the arm points down, pitch/twist blended instead of held, filter beta 1.0, robot slew 5 rad/s. Not done yet: recording/replay, servo speed measurement, calibration.
+- [~] Legs one to one for the hanging robot (2026-10-25, first draft, not yet tested on hardware)
 - [ ] Legs: plan in `docs/LEG_MIMIC_PLAN.md` (summary below)
 
 ### Adding legs

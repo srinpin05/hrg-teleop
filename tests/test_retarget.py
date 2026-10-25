@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hrg_teleop.retarget import (L_EAR, L_EL, L_HIP, L_SH, L_WR, NOSE, R_EAR, R_EL,  # noqa: E402
-                                 R_HIP, R_SH, R_WR, LIMITS, Retargeter, arm_fk, arm_ik)
+                                 R_HIP, R_SH, R_WR, LIMITS, Retargeter, arm_fk, arm_ik, leg_ik)
 
 D = math.radians
 
@@ -105,6 +105,32 @@ def test_landmark_handedness_does_not_matter():
     P2 = P.copy(); P2[:, 0] *= -1
     b = Retargeter(mirror=False).solve(P2, vis)
     assert max(abs(a[k] - b[k]) for k in a) < 1e-9
+
+
+def test_fast_move_recovers_from_flipped_branch():
+    """A fast move left the previous command on the flipped branch; once the arm
+    points down again the solver must return to the natural (small-roll) one."""
+    flipped = {"shoulder_pitch": D(170), "shoulder_roll": D(160), "forearm_twist": 0.0, "elbow": 0.0}
+    u, f = arm_fk(1, D(20), D(10), 0, D(40))
+    q = arm_ik(1, u, f, flipped)
+    assert abs(q["shoulder_roll"] - D(10)) < D(1) and abs(q["shoulder_pitch"] - D(20)) < D(1)
+
+
+def test_twist_blends_not_snaps():
+    prev = {"shoulder_pitch": 0.0, "shoulder_roll": D(10), "forearm_twist": 0.0, "elbow": 0.0}
+    u, f = arm_fk(1, 0, D(10), D(60), D(27))           # inside the blend band
+    t = arm_ik(1, u, f, prev)["forearm_twist"]
+    assert 0 < t < D(60)
+
+
+def test_legs():
+    z = leg_ik(1, [0, 0, -1], [0, 0, -1])
+    assert all(abs(v) < 1e-9 for v in z.values())                      # straight = all zero
+    q = leg_ik(1, [math.sin(D(40)), 0, -math.cos(D(40))], [0, 0, -1])  # thigh forward, shin vertical
+    assert abs(q["left_hip_pitch"] - D(40)) < 1e-6 and abs(q["left_knee"] - D(40)) < 1e-6
+    assert abs(q["left_ankle_pitch"]) < 1e-6                           # foot flat
+    q = leg_ik(-1, [0, -math.sin(D(20)), -math.cos(D(20))], [0, -math.sin(D(20)), -math.cos(D(20))])
+    assert abs(q["right_hip_roll"] - D(20)) < 1e-6                     # right leg out = +roll
 
 
 if __name__ == "__main__":

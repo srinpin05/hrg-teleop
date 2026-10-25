@@ -31,6 +31,7 @@ import numpy as np
 NOSE, L_EYE, R_EYE, L_EAR, R_EAR = 0, 2, 5, 7, 8
 L_SH, R_SH, L_EL, R_EL, L_WR, R_WR = 11, 12, 13, 14, 15, 16
 L_HIP, R_HIP = 23, 24
+L_KNEE, R_KNEE, L_ANK, R_ANK, L_HEEL, R_HEEL, L_TOE, R_TOE = 25, 26, 27, 28, 29, 30, 31, 32
 
 # Robot limits in degrees (arms/servo_calibration.json on the Pi, 2026-10-24),
 # pulled in 2 deg so we never ask for the exact end stop. The robot clamps again.
@@ -41,6 +42,18 @@ LIMITS_DEG = {
     "left_forearm_twist": (-38, 84), "left_elbow": (0, 105),
     "neck_yaw": (-88, 88), "neck_pitch": (-30, 20),
 }
+# LEGS, first draft (2026-10-25), for the robot hanging in its frame: one to one,
+# no balance. Signs from sim/hrg.xml (read only): hip_pitch + = thigh forward,
+# hip_roll + = leg outward, knee + = bend, ankle_pitch + = toes up. 0 = straight
+# leg. Ranges are deliberately narrower than the URDF; the robot clamps again.
+# hip_yaw is held at 0 (a webcam can't see thigh rotation reliably).
+LEG_LIMITS_DEG = {
+    "hip_yaw": (0, 0), "hip_roll": (-15, 35), "hip_pitch": (-12, 85),
+    "knee": (0, 95), "ankle_pitch": (-40, 45),
+}
+for _side in ("left", "right"):
+    for _j, _r in LEG_LIMITS_DEG.items():
+        LIMITS_DEG[f"{_side}_{_j}"] = _r
 LIMITS = {k: (math.radians(a), math.radians(b)) for k, (a, b) in LIMITS_DEG.items()}
 ARM_JOINTS = ("shoulder_pitch", "shoulder_roll", "forearm_twist", "elbow")
 
@@ -110,21 +123,31 @@ def arm_ik(s, u, f, prev=None, min_bend=math.radians(35), lateral_cos=0.25):
                 ok.append((roll, pp))
     if not ok:
         ok = [cands[0]]
-    if prev is not None:
+    if prev is not None and u[2] > -0.2:
+        # arm level or raised: the branch is genuinely ambiguous, stay continuous
         ok.sort(key=lambda c: abs(c[0] - prev["shoulder_roll"]) + abs(c[1] - prev["shoulder_pitch"]))
     else:
-        ok.sort(key=lambda c: c[0])            # prefer the smaller roll on the first frame
+        # arm pointing down: only the small-roll branch is natural. Resetting to it
+        # here means a fast move that landed on the flipped branch recovers.
+        ok.sort(key=lambda c: c[0])
     roll, pitch = ok[0]
-    if abs(math.cos(roll)) < lateral_cos:
-        pitch = prev["shoulder_pitch"] if prev is not None else 0.0
+    if prev is not None:
+        # near straight-out-sideways pitch barely moves the arm and camera noise
+        # swings it: blend from "hold" (|cos roll| <= 0.15) to "follow" (>= 0.5)
+        w = min(1.0, max(0.0, (abs(math.cos(roll)) - lateral_cos * 0.6) / (0.5 - lateral_cos * 0.6)))
+        pitch = prev["shoulder_pitch"] + w * wrap(pitch - prev["shoulder_pitch"])
+    elif abs(math.cos(roll)) < lateral_cos:
+        pitch = 0.0
 
     elbow = math.acos(max(-1.0, min(1.0, float(u @ f))))
     twist = prev["forearm_twist"] if prev is not None else 0.0
-    if elbow > min_bend:
+    if elbow > min_bend * 0.55:
         d0 = np.array([math.cos(pitch), 0.0, math.sin(pitch)])
         fp = _unit(f - float(f @ u) * u)
         ang = math.atan2(float(u @ np.cross(d0, fp)), float(d0 @ fp))
-        twist = s * ang
+        # twist is undefined with a straight elbow: blend in between ~20 and 35 deg
+        w = min(1.0, (elbow - min_bend * 0.55) / (min_bend * 0.45))
+        twist = twist + w * (s * ang - twist)
     return {
         "shoulder_pitch": clamp(f"{side}_shoulder_pitch", pitch),
         "shoulder_roll": clamp(f"{side}_shoulder_roll", roll),
@@ -133,12 +156,35 @@ def arm_ik(s, u, f, prev=None, min_bend=math.radians(35), lateral_cos=0.25):
     }
 
 
+def leg_ik(s, t, sh, foot=None):
+    """Thigh t, shin sh, foot heel->toe (body frame, unit or not) -> leg angles.
+    Hip modelled as roll (outer) then pitch: t = (sin p, s sin r cos p, -cos r cos p).
+    Foot: robot toe-up angle = hip_pitch - knee + ankle, so ankle = phi - hip + knee
+    where phi is the human foot's toe-up angle (0 = flat when foot not seen)."""
+    side = "left" if s > 0 else "right"
+    t, sh = _unit(np.asarray(t, float)), _unit(np.asarray(sh, float))
+    pitch = math.asin(max(-1.0, min(1.0, t[0])))
+    roll = math.atan2(s * t[1], -t[2])
+    knee = math.acos(max(-1.0, min(1.0, float(t @ sh))))
+    phi = 0.0
+    if foot is not None:
+        fv = np.asarray(foot, float)
+        phi = max(-0.5, min(0.5, math.atan2(fv[2], math.hypot(fv[0], fv[1]))))
+    ankle = phi - pitch + knee
+    return {f"{side}_hip_yaw": 0.0,
+            f"{side}_hip_roll": clamp(f"{side}_hip_roll", roll),
+            f"{side}_hip_pitch": clamp(f"{side}_hip_pitch", pitch),
+            f"{side}_knee": clamp(f"{side}_knee", knee),
+            f"{side}_ankle_pitch": clamp(f"{side}_ankle_pitch", ankle)}
+
+
 # ---- whole frame ----
 @dataclass
 class Retargeter:
     mirror: bool = True          # facing the robot: your right arm drives ITS left, like a mirror
     head: bool = True
-    min_visibility: float = 0.5
+    min_visibility: float = 0.3      # was 0.5: motion blur on fast moves froze the arm
+    legs: bool = False
     head_neutral_pitch: float = 0.0     # rad, set by calibrate_head()
     head_neutral_yaw: float = 0.0
     prev: dict = field(default_factory=dict)
@@ -180,6 +226,8 @@ class Retargeter:
             self.prev[side] = q
             for j, v in q.items():
                 out[f"{side}_{j}"] = v
+        if self.legs:
+            out.update(self.solve_legs(P, vis, B))
         if self.head and min(vis[NOSE], vis[L_EAR], vis[R_EAR]) >= self.min_visibility:
             yaw, pitch = self.head_angles(P, B)
             yaw -= self.head_neutral_yaw
@@ -187,6 +235,33 @@ class Retargeter:
                 yaw = -yaw                 # you look to your left -> it looks to ITS right
             out["neck_yaw"] = clamp("neck_yaw", yaw)
             out["neck_pitch"] = clamp("neck_pitch", pitch - self.head_neutral_pitch)
+        return out
+
+    def solve_legs(self, P, vis, B, min_vis=0.5):
+        """Both legs or nothing: hips, knees and ankles of both legs must be seen."""
+        if min(vis[i] for i in (L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANK, R_ANK)) < min_vis:
+            return {}
+        # pelvis frame: y along the hips, up from the torso, forward agrees with B
+        y = _unit(P[L_HIP] - P[R_HIP])
+        z = _unit(B[2] - float(B[2] @ y) * y)
+        x = _unit(np.cross(y, z))
+        if float(x @ B[0]) < 0:
+            x = -x
+        H = np.vstack([x, y, z])
+        if self.mirror:
+            legs = (("left", 1, R_HIP, R_KNEE, R_ANK, R_HEEL, R_TOE),
+                    ("right", -1, L_HIP, L_KNEE, L_ANK, L_HEEL, L_TOE))
+        else:
+            legs = (("left", 1, L_HIP, L_KNEE, L_ANK, L_HEEL, L_TOE),
+                    ("right", -1, R_HIP, R_KNEE, R_ANK, R_HEEL, R_TOE))
+        out = {}
+        for side, s, h, k, a, he, to in legs:
+            t = H @ (P[k] - P[h])
+            sh = H @ (P[a] - P[k])
+            foot = H @ (P[to] - P[he]) if min(vis[he], vis[to]) >= min_vis else None
+            if self.mirror:
+                t[1], sh[1] = -t[1], -sh[1]
+            out.update(leg_ik(s, t, sh, foot))
         return out
 
     @staticmethod

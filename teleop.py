@@ -10,6 +10,8 @@ Keys (click the video window first):
     M      mirror on/off. With mirror on (default), facing the robot, your
            right arm moves ITS left arm, like a mirror.
     H      head tracking on/off
+    L      legs on/off (first draft: one-to-one, ONLY with the robot hanging in its
+           frame). Needs both legs, hips to feet, in view. Robot: ./teleop.sh legs
     Q/ESC  quit (the robot's arms go to rest)
 
 The robot side must be running:  cd ~/hrg_deploy && ./teleop.sh
@@ -39,7 +41,9 @@ SEND_HZ_PAUSED = 10     # heartbeat while paused, so the robot shows "link OK"
 
 # skeleton lines for the overlay (MediaPipe Pose indices)
 BONES = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24), (23, 24),
-         (0, 7), (0, 8), (15, 19), (16, 20)]
+         (0, 7), (0, 8), (15, 19), (16, 20),
+         (23, 25), (25, 27), (24, 26), (26, 28), (27, 29), (29, 31), (28, 30), (30, 32)]
+LEG_KEYS = ("hip_yaw", "hip_roll", "hip_pitch", "knee", "ankle_pitch")
 
 
 def model_path(variant):
@@ -87,13 +91,24 @@ def draw_robot(q, size=300):
             a = np.array([0, s * sh_y, 0]); b = a + u * L; c = b + f * L
             cv2.line(img, proj(a, cx), proj(b, cx), col, 4)
             cv2.line(img, proj(b, cx), proj(c, cx), col, 4)
+        for side_name, s, col in (("left", 1, (255, 170, 60)), ("right", -1, (40, 160, 255))):
+            if f"{side_name}_knee" not in q:
+                continue
+            g = lambda j: q.get(f"{side_name}_{j}", 0.0)
+            p, r, kn = g("hip_pitch"), g("hip_roll"), g("knee")
+            hip = np.array([0, s * 0.05, -0.24])
+            t = np.array([math.sin(p), s * math.sin(r) * math.cos(p), -math.cos(r) * math.cos(p)])
+            sh = np.array([math.sin(p - kn), s * math.sin(r) * math.cos(p - kn), -math.cos(r) * math.cos(p - kn)])
+            k_ = hip + t * 0.1; a_ = k_ + sh * 0.1
+            cv2.line(img, proj(hip, cx), proj(k_, cx), col, 3)
+            cv2.line(img, proj(k_, cx), proj(a_, cx), col, 3)
         head = np.array([0, 0, 0.08])
         cv2.circle(img, proj(head, cx), int(0.05 * k), (200, 200, 200), 2)
         yaw, pitch = q.get("neck_yaw", 0.0), q.get("neck_pitch", 0.0)
         nose = head + 0.07 * np.array([math.cos(pitch) * math.cos(yaw),
                                        math.cos(pitch) * math.sin(yaw), math.sin(pitch)])
         cv2.line(img, proj(head, cx), proj(nose, cx), (0, 255, 0), 3)
-        cv2.putText(img, view, (cx - 60, size - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        cv2.putText(img, view, (cx - 60, size - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
     cv2.putText(img, "ROBOT (commanded)  orange=its right  blue=its left", (8, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
     return img
@@ -115,6 +130,7 @@ def main():
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--no-mirror", action="store_true")
     ap.add_argument("--no-head", action="store_true")
+    ap.add_argument("--legs", action="store_true", help="start with legs on (L toggles). Robot must be hanging.")
     ap.add_argument("--smooth", type=float, default=1.2,
                     help="filter min cutoff Hz: lower = smoother but laggier (default 1.2)")
     ap.add_argument("--max-frames", type=int, default=0, help="quit after N frames (testing)")
@@ -136,8 +152,10 @@ def main():
         raise SystemExit("can't open the camera. On a Mac, allow camera access for the Terminal app "
                          "(System Settings > Privacy & Security > Camera); try --camera 1")
     link = RobotLink(args.robot, args.port, dry=args.dry)
-    rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head)
-    filt = JointFilter(min_cutoff=args.smooth, beta=0.4)
+    rt = Retargeter(mirror=not args.no_mirror, head=not args.no_head, legs=args.legs)
+    # beta 1.0 (was 0.4): the filter opens up faster on quick moves -> less lag
+    filt = JointFilter(min_cutoff=args.smooth, beta=1.0)
+    legs_seen = 0.0
     sending = False
     cmd = {}                     # last command per joint (joints not seen this frame hold)
     last_seen = 0.0
@@ -169,10 +187,15 @@ def main():
             q = rt.solve(P, vis)
             if q:
                 last_seen = now
+                if any(k.endswith("_knee") for k in q):
+                    legs_seen = now
                 cmd.update(filt(q, now))
         tracking = now - last_seen < LOST_AFTER
         if sending and tracking:
-            link.send(True, cmd)
+            arms = {k: v for k, v in cmd.items() if not k.endswith(LEG_KEYS)}
+            legs = ({k: v for k, v in cmd.items() if k.endswith(LEG_KEYS)}
+                    if rt.legs and now - legs_seen < 0.3 else None)
+            link.send(True, arms, legs)
         elif now - last_paused_send > 1.0 / SEND_HZ_PAUSED:
             link.send(False, {})                 # robot: ease to rest / stay at rest
             last_paused_send = now
@@ -202,15 +225,21 @@ def main():
                    (f"rtt {link.rtt_ms:.0f} ms" if replied and link.rtt_ms is not None else "robot not replying"))
             lines = [state,
                      f"{fps:4.0f} fps  model {infer_ms:4.0f} ms  {net}",
-                     f"mirror {'ON' if rt.mirror else 'off'}  head {'ON' if rt.head else 'off'}"]
+                     f"mirror {'ON' if rt.mirror else 'off'}  head {'ON' if rt.head else 'off'}  legs "
+                     + (("ON (seen)" if now - legs_seen < 0.3 else "ON - NEED BOTH LEGS IN VIEW") if rt.legs else "off")]
             for i, txt in enumerate(lines):
                 cv2.putText(view, txt, (10, 24 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             col if i == 0 else (255, 255, 255), 2)
             panel = draw_robot(cmd, size=h // 2)
             joints = np.full((h - panel.shape[0], panel.shape[1], 3), 24, np.uint8)
-            for i, (k, v) in enumerate(sorted(cmd.items())):
-                cv2.putText(joints, f"{k:22s}{math.degrees(v):+6.0f}", (8, 18 + 16 * i),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
+            arm_items = sorted((k, v) for k, v in cmd.items() if not k.endswith(LEG_KEYS))
+            leg_items = sorted((k, v) for k, v in cmd.items() if k.endswith(LEG_KEYS)) if rt.legs else []
+            colw = joints.shape[1] // 2
+            for c, items in enumerate((arm_items, leg_items)):
+                for i, (k, v) in enumerate(items):
+                    name = k.replace("shoulder_", "sh_").replace("forearm_", "fa_").replace("_pitch", "_p")
+                    cv2.putText(joints, f"{name:15s}{math.degrees(v):+5.0f}", (6 + c * colw, 14 + 13 * i),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.37, (220, 220, 220), 1)
             cv2.imshow("HRG teleop", np.hstack([view, np.vstack([panel, joints])]))
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
@@ -221,6 +250,12 @@ def main():
             elif key == ord("m"):
                 rt.mirror = not rt.mirror
                 rt.prev.clear()
+            elif key == ord("l"):
+                rt.legs = not rt.legs
+                if not rt.legs:
+                    for k in [k for k in cmd if k.endswith(LEG_KEYS)]:
+                        del cmd[k]
+                print("legs", "ON" if rt.legs else "off")
             elif key == ord("h"):
                 rt.head = not rt.head
             elif key == ord("c") and last_P is not None:

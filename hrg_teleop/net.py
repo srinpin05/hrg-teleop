@@ -35,13 +35,15 @@ class RobotLink:
         self.sent_at = {}
         threading.Thread(target=self._acks, daemon=True).start()
 
-    def send(self, enable, arms):
+    def send(self, enable, arms, legs=None):
         self.seq += 1
         if self.dry or self.addr is None:
             return
         t = time.time()
         msg = {"v": 1, "seq": self.seq, "t": t, "enable": bool(enable),
                "arms": {k: round(float(v), 4) for k, v in arms.items()}}
+        if legs:
+            msg["legs"] = {k: round(float(v), 4) for k, v in legs.items()}
         self.sent_at[self.seq] = time.monotonic()
         if len(self.sent_at) > 200:
             for k in sorted(self.sent_at)[:100]:
